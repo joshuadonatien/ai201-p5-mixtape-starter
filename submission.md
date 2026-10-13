@@ -109,3 +109,19 @@ This matches kenji's report exactly: the streak only breaks when the second day 
 - I reran my repro script on both sides of the Sunday boundary: Sat→Sun and Sun→Mon both go 12→13, and a skipped day still resets to 1.
 - Through the live API: kenji (already listened today) stays at 12 after another `POST /songs/<id>/listen`, and darius (listened yesterday) goes 3 → 4.
 
+### **Issue #2 — Friends Listening Now shows people from yesterday**
+
+**How I reproduced it.** In the seeded data, every user has a listen from the last 30 minutes, so I needed a friend whose *only* listen was the previous evening. kenji ↔ aaliya are friends, so I deleted aaliya's listening events and inserted one at **2026-10-12 23:00 UTC** (yesterday evening). At 21:55 UTC on 2026-10-13, `GET /feed/<kenji_id>/listening-now` returned aaliya "listening now" with `listened_at: 2026-10-12T23:00:00`. This is the same situation as darius in nova's report: a listen from last night still showing the next day.
+
+**How I found the root cause.** Route `listening_now()` in `routes/feed.py` → `get_friends_listening_now()` in `services/feed_service.py`. The function gets the friend IDs, queries `ListeningEvent`s with `listened_at >= cutoff`, and de-duplicates to one event per friend. The friend lookup and de-duplication matched the docstring, so I focused on `cutoff`. It is `datetime.now(timezone.utc) - RECENT_THRESHOLD`, with `RECENT_THRESHOLD = timedelta(hours=24)` at the top of the file. Doing the math confirmed it: 21:55 today minus 24h = 21:55 yesterday, and 23:00 yesterday is after that, so it passes the filter. The reporter's phrase "keeps hanging around … until the same time the next day" describes a rolling 24-hour window exactly.
+
+**The root cause.** `get_friends_listening_now()` decided "recent" with a **rolling 24-hour window** (`now - 24h`), but the feature's intended behavior is "friends who have listened **today**", a calendar-day boundary. Any listen from yesterday that happened later in the day than the current time-of-day is still less than 24 hours old, so it passed the `listened_at >= cutoff` filter. An 11pm listen therefore stayed in the feed all of the next day until 11pm.
+
+**My fix.** I changed the cutoff to the start of the current day: `datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)`, and removed the now-unused `RECENT_THRESHOLD` constant. "Today" is defined in UTC because the app stores all timestamps in UTC and the streak logic in `streak_service.py` uses the same UTC calendar-day boundary, so "listened today" now means the same thing for both features.
+
+**Side-effect check.**
+- **Regression test:** I added `tests/test_feed.py::test_listening_now_excludes_friends_who_last_listened_yesterday`. A friend who listened at 23:59 yesterday (always within 24h) must be excluded, and a friend who listened just now must be included. It **fails on the original code** (`['simone', 'darius'] != ['simone']`) and passes with the fix.
+- Live API: aaliya (last listen yesterday 23:00) no longer appears in kenji's feed. nova's feed still shows darius, kenji, and simone, who all listened today, newest first with one entry per friend.
+- `get_activity_feed()` (`/feed/<id>/activity`) never used the cutoff and still returns all recent friend events (10 for nova).
+- Known tradeoff: with a UTC day boundary, a user in a US timezone sees the feed "reset" at 7–8pm local time. Making it per-user would need a timezone field on `User`, which is out of scope for a targeted fix.
+
