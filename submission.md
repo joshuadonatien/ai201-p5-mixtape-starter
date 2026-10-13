@@ -85,3 +85,27 @@ _(To be completed at the end of the project.)_
 - The broad query `q=a` returns all 13 songs with no repeats, `q=ZZZ` returns `[]`, and a missing `q` still returns 400.
 - `get_song()` in the same file doesn't use the join and is unchanged.
 
+### **Issue #1 — My listening streak keeps resetting**
+
+**How I reproduced it.** The bug only happens on Sundays, so I couldn't wait for the clock. I isolated `update_listening_streak(user, now)` in a small Python script that builds an in-memory `User` with `listening_streak=12` and passes in controlled datetimes (October 2026: Sat the 10th, Sun the 11th):
+
+| Transition | `today.weekday()` | Streak 12 → |
+|---|---|---|
+| Fri 20:00 → Sat 09:00 | 5 | 13 ✅ |
+| **Sat 22:00 → Sun 09:00** | **6** | **1** ❌ |
+| Sun 22:00 → Mon 09:00 | 0 | 13 ✅ |
+| Thu → Sat (skipped a day) | 5 | 1 ✅ |
+
+This matches kenji's report exactly: the streak only breaks when the second day is a Sunday, and it counts normally again on Monday. The existing test `test_streak_increments_on_sunday` also failed (`assert 1 == 2`).
+
+**How I found the root cause.** `GET /users/<id>/streak` → `streak()` in `routes/users.py` → `get_streak()`, which only reads the stored `User.listening_streak`. So the bad value had to be *written* somewhere else. I searched for writers of `listening_streak` and found `update_listening_streak()`, called from `record_listening_event()` (the `POST /songs/<id>/listen` path). I compared its branches to the rules in its own docstring ("If the user listened yesterday: streak increments by 1"). The increment branch is `elif days_since_last == 1 and today.weekday() != 6:`. The docstring says nothing about weekdays, and in Python `date.weekday()` numbers Monday=0 … **Sunday=6**. That extra clause is false only on Sundays, which matched the "always a Sunday" pattern. The table above confirmed it.
+
+**The root cause.** In `update_listening_streak()` in `services/streak_service.py`, the "listened yesterday → increment" branch had an extra condition, `and today.weekday() != 6`. When today is Sunday, that condition is false, so even with `days_since_last == 1` the code skipped the increment and fell through to the `else` branch, which resets the streak to 1 (the rule meant for "more than one day has passed"). Every user who listened Saturday and then Sunday lost their streak.
+
+**My fix.** I removed the `and today.weekday() != 6` clause, so the branch is just `elif days_since_last == 1:`. Now the code matches the documented rules: same day → no change, exactly one calendar day later → +1, more than one day → reset to 1. The decision now depends only on the number of days between listens, not on which day of the week it is.
+
+**Side-effect check.**
+- `pytest tests/test_streaks.py` passes 5/5: first listen → 1, consecutive days increment, a skipped day resets, the same day doesn't double-count, and Sat → Sun increments (previously failing).
+- I reran my repro script on both sides of the Sunday boundary: Sat→Sun and Sun→Mon both go 12→13, and a skipped day still resets to 1.
+- Through the live API: kenji (already listened today) stays at 12 after another `POST /songs/<id>/listen`, and darius (listened yesterday) goes 3 → 4.
+
