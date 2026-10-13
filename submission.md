@@ -53,3 +53,19 @@ _(To be completed at the end of the project.)_
 
 ## Root Cause Analyses
 
+### **Issue #5 — The last song in a playlist never shows up**
+
+**How I reproduced it.** After running `seed_data.py`, I counted the rows for "Friday Energy" directly in the database (`SELECT count(*) FROM playlist_entries WHERE playlist_id=…` → **7**). Then I called `GET /playlists/<friday_energy_id>/songs`, which returned `"count": 6`. The missing song was "Harlem Renaissance", which has `position = 7`, the highest. The other two seeded playlists showed the same 7 → 6 drop. The existing tests `test_playlist_returns_all_songs` and `test_playlist_returns_songs_in_order` also failed (5-song playlist → 4 returned, `Track 5` missing).
+
+**How I found the root cause.** I started at the route `get_songs()` in `routes/playlists.py`. It only calls `get_playlist_songs()` and returns `len(songs)` as the count, so the count and the list come from the same place. In `services/playlist_service.py`, I checked the query first: the join on `playlist_entries`, the filter on `playlist_id`, and `order_by(position ASC)` are all correct. That told me the database was returning all 7 rows. The last line, `return [song.to_dict() for song in songs[:-1]]`, was the moment I was sure: the data is correct until the very last step, and only then does a song disappear.
+
+**The root cause.** `get_playlist_songs()` documents that it "returns all songs in the playlist," and its query does fetch all of them, sorted by `position` ascending. The return statement then slices the result with `songs[:-1]`, which in Python means "every element except the last one." Because the list is sorted by position, the dropped element is always the song with the highest position, which is the most recently added one. That explains the reporter's exact symptom: adding a new song makes the previously hidden song no longer last, so it reappears, and the new song is hidden instead.
+
+**My fix.** I changed `songs[:-1]` to `songs` so the function returns the full query result. This matches its documented contract. The query and ordering were already correct, so nothing else needed to change.
+
+**Side-effect check.**
+- `pytest tests/test_playlists.py` passes 3/3, including the two tests that were failing and `test_empty_playlist_returns_empty_list`.
+- Through the API, all three seeded playlists now return 7 of 7 songs in `position` order.
+- A newly created empty playlist returns `{"count": 0, "songs": []}`, and an unknown playlist ID still returns 404.
+- `get_playlist()` (metadata) and `add_to_playlist()` don't use this function's return value for anything except membership, so they are unaffected.
+
