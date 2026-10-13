@@ -125,3 +125,27 @@ This matches kenji's report exactly: the streak only breaks when the second day 
 - `get_activity_feed()` (`/feed/<id>/activity`) never used the cutoff and still returns all recent friend events (10 for nova).
 - Known tradeoff: with a UTC day boundary, a user in a US timezone sees the feed "reset" at 7–8pm local time. Making it per-user would need a timezone field on `User`, which is out of scope for a targeted fix.
 
+### **Issue #4 — I got notified when a friend added my song to a playlist but not when they rated it**
+
+**How I reproduced it.** With the seeded database, nova's `GET /users/<nova_id>/notifications` showed 1 notification (the seeded `song_added_to_playlist` one). I had kenji rate one of nova's shared songs with `POST /songs/<song_id>/rate` `{"user_id": <kenji_id>, "score": 5}`. The response was 201 with the saved `Rating`, so the rating worked. Fetching nova's notifications again still showed **1**. No rating notification was created, which matches aaliya's report.
+
+**How I found the root cause.** Following the hint to compare the working notification with the missing one, I traced both from their routes. `POST /playlists/<id>/songs` → `add_to_playlist()` and `POST /songs/<id>/rate` → `rate_song()` both live in `services/notification_service.py`. Comparing them step by step:
+
+| Step | `add_to_playlist` | `rate_song` |
+|---|---|---|
+| Validate & load song / user | ✅ | ✅ |
+| Write the change and commit | ✅ append to `playlist.songs` | ✅ create/update `Rating` |
+| `if song.shared_by != actor: create_notification(...)` | ✅ | **❌ missing** |
+
+`rate_song` ends with `db.session.commit()` and `return rating`. Nothing in the function calls `create_notification`. To make sure there wasn't a notification created elsewhere (in the route, or some hook), I searched the project for `create_notification(` and `song_rated`. The only call is in `add_to_playlist`, and `'song_rated'` appears only as an example in `create_notification`'s docstring. A notification type that is documented but never created confirmed this was the cause.
+
+**The root cause.** Notifications in Mixtape aren't triggered automatically (no database triggers or event listeners). Each action function has to explicitly call `create_notification()` for the song's sharer after it saves its own change. `add_to_playlist()` does this. `rate_song()` saves the `Rating` and returns without ever calling `create_notification()`. So ratings were stored correctly, but no `Notification` row was ever written, and `get_notifications()` had nothing to return. This affected every user and every rating, which matches "ratings notifications seem to just not happen, for anyone."
+
+**My fix.** After the rating is committed, `rate_song()` now follows the same pattern as `add_to_playlist()`: if `song.shared_by != user_id`, it calls `create_notification(user_id=song.shared_by, notification_type="song_rated", body=f"{rater.username} rated your song '{song.title}' {score} out of 5.")`. The type string matches the one already named in `create_notification`'s docstring. The self-action check means users aren't notified about rating their own songs, the same rule the playlist notification uses.
+
+**Side-effect check.**
+- **Regression tests:** I added `tests/test_notifications.py`. `test_rating_notifies_song_sharer` **fails on the original code** and passes with the fix. `test_rating_own_song_does_not_notify` checks the self-rating case.
+- Live API: kenji rating nova's song → nova's count goes 1 → 2, with the newest entry `song_rated: "kenji rated your song 'Midnight Drive' 4 out of 5."` nova rating her own song → no new notification. A score of 9 → 400 "Score must be between 1 and 5", and no notification is created, because validation runs before anything is written.
+- The existing `song_added_to_playlist` notification is still listed, and `?unread_only=true` still filters correctly.
+- Rating storage is unchanged: re-rating still updates the single existing `Rating` (unique `(user_id, song_id)`), so the 201 response is the same as before.
+
