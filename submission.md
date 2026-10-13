@@ -69,3 +69,19 @@ _(To be completed at the end of the project.)_
 - A newly created empty playlist returns `{"count": 0, "songs": []}`, and an unknown playlist ID still returns 404.
 - `get_playlist()` (metadata) and `add_to_playlist()` don't use this function's return value for anything except membership, so they are unaffected.
 
+### **Issue #3 — The same song keeps showing up twice in search**
+
+**How I reproduced it.** With the seeded database, `GET /songs/search?q=Anthem` returned `"count": 3` and listed "Crown Heights Anthem" three times. To find the condition that triggers it, I searched for songs with different tag counts: "Midnight Drive" (0 tags) and "Block Party" (1 tag) each came back once, while every 3-tag song (Crown Heights Anthem, Harlem Renaissance, After Hours) came back three times. So the number of copies equals the number of tags, with a minimum of 1. The existing test `test_search_no_duplicates_multi_tag_song` also failed (3 instead of 1), while the 0-tag and 1-tag tests passed.
+
+**How I found the root cause.** Route `search()` in `routes/songs.py` → `search_songs()` in `services/search_service.py`. The query is `select(Song).outerjoin(song_tags, …).filter(title ILIKE … OR artist ILIKE …)`. The "copies = tag count" pattern pointed straight at the join to `song_tags`. I checked whether the join was used anywhere: the filter only references `Song.title` and `Song.artist`, and the `tags` in each result come from `Song.to_dict()` reading the `Song.tags` relationship, not from the joined rows. `git log` showed the previous commit (`dc87e8c`) converted this query from the legacy `db.session.query(Song)` API to 2.0-style `select()`. That explained why the duplicates appeared: the legacy `Query` automatically de-duplicates full ORM entities, but `session.execute(select(Song)).scalars().all()` returns one object per SQL row.
+
+**The root cause.** `search_songs()` outer-joined `Song` to the `song_tags` association table even though nothing in the query needed tag data. A join returns one row for every (song, tag) pair, so a song with three tags produced three rows. Songs with zero tags (kept by the *outer* join) or one tag produced a single row, which is why only some songs were duplicated. `select(...).scalars().all()` does not collapse identical entities, so each extra row became a repeated song in the response.
+
+**My fix.** I removed the unneeded `.outerjoin(song_tags, …)`, so the query selects from `song` alone and returns one row per matching song. I also removed the now-unused `Tag` and `song_tags` imports. Removing the join fixes the actual cause. Adding `.distinct()` would only hide the extra rows that the join creates.
+
+**Side-effect check.**
+- `pytest tests/test_search.py` passes 5/5 (no-duplicate tests for 0, 1, and 3 tags, plus "returns matching songs" and "empty for no match").
+- Through the API, "Anthem", "Harlem", and "After" each return 1 result, and each result still includes its full `tags` list (e.g. `['rap', 'hip-hop', 'boom bap']`), so tag display is unaffected.
+- The broad query `q=a` returns all 13 songs with no repeats, `q=ZZZ` returns `[]`, and a missing `q` still returns 400.
+- `get_song()` in the same file doesn't use the join and is unchanged.
+
