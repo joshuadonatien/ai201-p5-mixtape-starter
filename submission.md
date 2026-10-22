@@ -4,7 +4,8 @@
 
 ## AI Usage
 
-I used AI to deeply understnd teh intrsuctions and to write tests for whenever I though teh bugs were completed. Also I used AI to make sure I completed everything in regards to the rubric by putting the rubric int clause and tehn having it check.
+I used AI to deeply understand the instructions and to write tests for whenever I thought the bugs were fixed. I also used AI to make sure I completed everything in the rubric by pasting the rubric into Claude and then having it check my work.
+
 ---
 
 ## Codebase Map
