@@ -4,8 +4,7 @@
 
 ## AI Usage
 
-_(To be completed at the end of the project.)_
-
+I used AI to deeply understnd teh intrsuctions and to write tests for whenever I though teh bugs were completed. Also I used AI to make sure I completed everything in regards to the rubric by putting the rubric int clause and tehn having it check.
 ---
 
 ## Codebase Map
@@ -145,7 +144,7 @@ This matches kenji's report exactly: the streak only breaks when the second day 
 
 **Side-effect check.**
 - **Regression tests:** I added `tests/test_notifications.py`. `test_rating_notifies_song_sharer` **fails on the original code** and passes with the fix. `test_rating_own_song_does_not_notify` checks the self-rating case.
-- Live API: kenji rating nova's song → nova's count goes 1 → 2, with the newest entry `song_rated: "kenji rated your song 'Midnight Drive' 4 out of 5."` nova rating her own song → no new notification. A score of 9 → 400 "Score must be between 1 and 5", and no notification is created, because validation runs before anything is written.
+- Live API: kenji rating nova's song → nova's count goes 1 → 2, with the newest entry `song_rated: "kenji rated your song 'Midnight Drive' 4 out of 5."` nova rating a song nova shared → no new notification. A score of 9 → 400 "Score must be between 1 and 5", and no notification is created, because validation runs before anything is written.
 - The existing `song_added_to_playlist` notification is still listed, and `?unread_only=true` still filters correctly.
 - Rating storage is unchanged: re-rating still updates the single existing `Rating` (unique `(user_id, song_id)`), so the 201 response is the same as before.
 
