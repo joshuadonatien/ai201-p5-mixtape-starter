@@ -149,3 +149,9 @@ This matches kenji's report exactly: the streak only breaks when the second day 
 - The existing `song_added_to_playlist` notification is still listed, and `?unread_only=true` still filters correctly.
 - Rating storage is unchanged: re-rating still updates the single existing `Rating` (unique `(user_id, song_id)`), so the 201 response is the same as before.
 
+
+---
+
+## git log --oneline (bugfix/mixtape)
+
+![git log --oneline on bugfix/mixtape](git-log.png)
